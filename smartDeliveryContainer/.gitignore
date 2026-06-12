@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+config/.env
+data/events/*.jsonl
+data/snapshots/
+data/videos/
+logs/
+*.egg-info/
+dist/
+build/
+.pytest_cache/

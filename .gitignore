@@ -1,0 +1,38 @@
+# 환경변수 (보안상 절대 업로드 금지)
+.env
+.env.*
+!.env.example
+!*.example.env
+
+# Python 가상환경
+myenv/
+.venv/
+venv/
+env/
+
+# Python 캐시
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# 영상/이벤트 데이터
+smartDeliveryContainer/video/
+data/events/
+
+# IDE / 툴 설정
+.claude/
+.agents/
+.codex/
+.idea/
+.vscode/
+
+# 로그
+*.log
+
+# macOS
+.DS_Store

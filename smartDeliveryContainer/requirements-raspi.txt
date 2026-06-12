@@ -1,0 +1,7 @@
+-r requirements.txt
+
+gpiozero>=2.0,<3
+lgpio>=0.2.2,<1
+RPi.GPIO>=0.7,<1
+hx711-rpi-py>=1.0,<2
+pyserial>=3.5,<4
