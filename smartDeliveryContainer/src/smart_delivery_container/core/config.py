@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=Path(__file__).parents[4] / "config" / ".env", override=False)
+load_dotenv(dotenv_path=Path(__file__).parents[3] / "config" / ".env", override=False)
 load_dotenv(override=False)
 
 
@@ -37,6 +37,27 @@ class CameraConfig:
 
 
 @dataclass
+class HcSr04Config:
+    trigger_pin: int = field(default_factory=lambda: int(os.getenv("HCSR04_TRIGGER_PIN", "23")))
+    echo_pin: int = field(default_factory=lambda: int(os.getenv("HCSR04_ECHO_PIN", "24")))
+    threshold_cm: float = field(default_factory=lambda: float(os.getenv("HCSR04_THRESHOLD_CM", "20.0")))
+    sample_interval_ms: int = field(default_factory=lambda: int(os.getenv("HCSR04_SAMPLE_INTERVAL_MS", "100")))
+    cooldown_ms: int = field(default_factory=lambda: int(os.getenv("HCSR04_COOLDOWN_MS", "2000")))
+
+
+@dataclass
+class SpeakerConfig:
+    pin: int = field(default_factory=lambda: int(os.getenv("SPEAKER_PIN", "18")))
+    frequency: int = field(default_factory=lambda: int(os.getenv("SPEAKER_FREQUENCY", "2000")))
+
+
+@dataclass
+class TelegramConfig:
+    token: str = field(default_factory=lambda: os.getenv("TELEGRAM_TOKEN", ""))
+    chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+
+
+@dataclass
 class MqttConfig:
     host: str = field(default_factory=lambda: os.getenv("MQTT_HOST", ""))
     port: int = field(default_factory=lambda: int(os.getenv("MQTT_PORT", "1883")))
@@ -46,6 +67,9 @@ class MqttConfig:
 @dataclass
 class RuntimeConfig:
     pir: PirConfig = field(default_factory=PirConfig)
+    hcsr04: HcSr04Config = field(default_factory=HcSr04Config)
     weight: WeightConfig = field(default_factory=WeightConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
+    speaker: SpeakerConfig = field(default_factory=SpeakerConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
     mqtt: MqttConfig = field(default_factory=MqttConfig)

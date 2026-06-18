@@ -23,6 +23,8 @@ build/
 # 영상/이벤트 데이터
 smartDeliveryContainer/video/
 data/events/
+esp32cam_stream/webapp/videos/
+esp32cam_stream/webapp/snapshots/
 
 # IDE / 툴 설정
 .claude/

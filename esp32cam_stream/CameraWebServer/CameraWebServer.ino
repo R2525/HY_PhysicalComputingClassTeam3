@@ -6,6 +6,7 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "esp_http_server.h"
+#include "esp_task_wdt.h"
 
 // AI Thinker ESP32-CAM 핀 정의
 #define PWDN_GPIO_NUM     32
@@ -34,6 +35,10 @@ static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 httpd_handle_t stream_httpd = NULL;
+unsigned long lastWifiAttemptMs = 0;
+unsigned long lastStatusMs = 0;
+unsigned long lastConnectedMs = 0;
+bool cameraReady = false;
 
 static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t * fb = NULL;
@@ -79,9 +84,19 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   return res;
 }
 
+void stopCameraServer() {
+  if (stream_httpd != NULL) {
+    httpd_stop(stream_httpd);
+    stream_httpd = NULL;
+  }
+}
+
 void startCameraServer() {
+  if (stream_httpd != NULL) return;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 81;
+  config.ctrl_port = 32768;
+  config.max_open_sockets = 2;
 
   httpd_uri_t stream_uri = {
     .uri       = "/stream",
@@ -92,14 +107,21 @@ void startCameraServer() {
 
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);
+    Serial.println("Camera stream server started");
+  } else {
+    stream_httpd = NULL;
+    Serial.println("Camera stream server start failed");
   }
 }
 
-void setup() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // 브라운아웃 감지 비활성화
+bool initCamera() {
+  if (cameraReady) return true;
 
-  Serial.begin(115200);
-  Serial.println();
+  pinMode(PWDN_GPIO_NUM, OUTPUT);
+  digitalWrite(PWDN_GPIO_NUM, HIGH);
+  delay(500);
+  digitalWrite(PWDN_GPIO_NUM, LOW);
+  delay(500);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -116,43 +138,115 @@ void setup() {
   config.pin_pclk     = PCLK_GPIO_NUM;
   config.pin_vsync    = VSYNC_GPIO_NUM;
   config.pin_href     = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 8000000;
   config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
 
   if (psramFound()) {
-    config.frame_size   = FRAMESIZE_VGA;
+    config.frame_size   = FRAMESIZE_UXGA;
     config.jpeg_quality = 10;
     config.fb_count     = 2;
+    config.fb_location  = CAMERA_FB_IN_PSRAM;
   } else {
-    config.frame_size   = FRAMESIZE_SVGA;
+    config.frame_size   = FRAMESIZE_CIF;
     config.jpeg_quality = 12;
     config.fb_count     = 1;
+    config.fb_location  = CAMERA_FB_IN_DRAM;
   }
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed: 0x%x\n", err);
+    cameraReady = false;
+    return false;
+  }
+  Serial.println("Camera init OK");
+  cameraReady = true;
+  return true;
+}
+
+void connectWifi(bool force) {
+  if (WiFi.status() == WL_CONNECTED) {
+    lastConnectedMs = millis();
     return;
   }
 
-  WiFi.begin(ssid, password);
-  Serial.print("WiFi 연결 중");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi 연결 완료!");
-  Serial.print("스트림 URL: http://");
-  Serial.print(WiFi.localIP());
-  Serial.println(":81/stream");
+  unsigned long now = millis();
+  if (!force && now - lastWifiAttemptMs < 5000) return;
+  lastWifiAttemptMs = now;
 
-  startCameraServer();
+  stopCameraServer();
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(ssid, password);
+  Serial.printf("WiFi reconnecting to %s\n", ssid);
+}
+
+void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println();
+  Serial.println("ESP32-CAM boot");
+
+  esp_task_wdt_deinit();
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = 30000,
+    .idle_core_mask = 0,
+    .trigger_panic = true,
+  };
+  esp_task_wdt_init(&wdt_config);
+  esp_task_wdt_add(NULL);
+
+  initCamera();
+  connectWifi(true);
 }
 
 void loop() {
-  delay(1);
+  esp_task_wdt_reset();
+
+  if (!cameraReady) {
+    initCamera();
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWifi(false);
+  } else {
+    lastConnectedMs = millis();
+    if (stream_httpd == NULL && cameraReady) {
+      Serial.println("WiFi connected");
+      Serial.print("Stream URL: http://");
+      Serial.print(WiFi.localIP());
+      Serial.println(":81/stream");
+      startCameraServer();
+    }
+  }
+
+  unsigned long now = millis();
+  if (now - lastStatusMs > 10000) {
+    lastStatusMs = now;
+    Serial.printf(
+      "status wifi=%d camera=%d server=%d ip=%s rssi=%d heap=%lu\n",
+      WiFi.status(),
+      cameraReady ? 1 : 0,
+      stream_httpd != NULL ? 1 : 0,
+      WiFi.localIP().toString().c_str(),
+      WiFi.RSSI(),
+      ESP.getFreeHeap()
+    );
+  }
+
+  if (lastConnectedMs != 0 && now - lastConnectedMs > 120000) {
+    Serial.println("WiFi offline too long, restarting");
+    ESP.restart();
+  }
+
+  delay(100);
 }
