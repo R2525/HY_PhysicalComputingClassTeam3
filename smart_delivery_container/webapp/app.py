@@ -40,7 +40,9 @@ HX711_CLK_PIN  = 6   # 물리 핀 31
 # HC-SR04 GPIO 핀 (BCM 번호)
 HCSR04_TRIGGER_PIN = 23  # 물리 핀 16
 HCSR04_ECHO_PIN    = 24  # 물리 핀 18
-HCSR04_THRESHOLD_CM = float(os.getenv("HCSR04_THRESHOLD_CM", "200.0"))
+HCSR04_THRESHOLD_CM   = float(os.getenv("HCSR04_THRESHOLD_CM", "200.0"))
+DISTANCE_CHANGE_CM    = float(os.getenv("DISTANCE_CHANGE_CM", "10.0"))   # 변화 감지 임계값
+CAMERA_IDLE_SECONDS   = float(os.getenv("CAMERA_IDLE_SECONDS", "60.0"))  # 안정 유지 시 카메라 OFF
 
 # 스피커 GPIO 핀 (BCM 번호)
 SPEAKER_PIN       = int(os.getenv("SPEAKER_PIN", "18"))      # 물리 핀 12
@@ -252,6 +254,18 @@ def store_camera_frame(jpeg: bytes) -> None:
                 camera_frames[-1][0] - camera_frames[0][0], 1
             ) if len(camera_frames) >= 2 else 0.0
         camera_condition.notify_all()
+
+
+def stop_camera_buffering() -> None:
+    if not camera_requested.is_set():
+        return
+    camera_requested.clear()
+    with state_lock:
+        state["camera_requested"] = False
+        state["camera_buffer_started_at"] = None
+        state["camera_buffer_seconds"] = 0.0
+        state["camera_buffer_frames"] = 0
+    print("[CAM] 버퍼링 중지 — 저전력 감시 모드")
 
 
 def start_camera_buffering(reason: str) -> None:
@@ -718,9 +732,15 @@ def measure_distance_cm() -> float:
 
 
 def read_ultrasonic_loop():
-    """초음파 거리 측정과 UI 로그 업데이트."""
-    last_state = None
+    """초음파 거리 측정 — 변화 감지 시 카메라 ON, 1분 안정 시 카메라 OFF."""
     last_log = 0.0
+    last_log_detected = None
+
+    # 기준 거리 추정용 버퍼 (스파이크 제거: 중간값 사용)
+    buf = deque(maxlen=30)
+    baseline = None            # 안정 상태 기준 거리
+    last_change_time = 0.0     # 마지막 변화 발생 시각
+
     while True:
         try:
             if ultra_gpio is None:
@@ -728,26 +748,55 @@ def read_ultrasonic_loop():
                 continue
 
             distance = measure_distance_cm()
-            detected = distance <= HCSR04_THRESHOLD_CM
             now = time.time()
-            note = ""
-            should_log = False
-            if last_state is None or detected != last_state:
-                note = "접근 감지" if detected else "감지 해제"
-                should_log = True
-                if detected:
-                    start_camera_buffering("초음파 감지")
-            elif now - last_log >= 5.0:
-                should_log = True
+            buf.append(distance)
+
+            # 초기 기준값 수집 (10샘플 이상 모이면 확정)
+            if baseline is None:
+                if len(buf) >= 10:
+                    baseline = sorted(buf)[len(buf) // 2]
+                    print(f"[HC-SR04] 기준 거리 확정: {baseline:.1f}cm")
+                with state_lock:
+                    state["distance_cm"] = round(distance, 1)
+                time.sleep(0.2)
+                continue
+
+            # 스파이크 제거: 최근 5샘플 중간값
+            recent = sorted(list(buf)[-5:])
+            smoothed = recent[len(recent) // 2]
+
+            # 변화 감지 (기준 대비 ±DISTANCE_CHANGE_CM 이상)
+            changed = abs(smoothed - baseline) >= DISTANCE_CHANGE_CM
+
+            if changed:
+                last_change_time = now
+                if not camera_requested.is_set():
+                    start_camera_buffering(f"초음파 변화 감지 ({smoothed:.1f}cm, 기준 {baseline:.1f}cm)")
+            else:
+                # 카메라가 켜져 있고 1분 이상 안정 → 카메라 OFF, 기준 갱신
+                if camera_requested.is_set() and (now - last_change_time) >= CAMERA_IDLE_SECONDS:
+                    stop_camera_buffering()
+                    baseline = smoothed
+                    buf.clear()
+                    buf.append(smoothed)
+                    _add_ultrasonic_log(distance, False, "안정 — 저전력 모드")
+                    last_log = now
+
+                # 카메라 꺼진 상태에서는 기준값 서서히 갱신
+                if not camera_requested.is_set():
+                    baseline = smoothed
 
             with state_lock:
                 state["distance_cm"] = round(distance, 1)
-                state["proximity"] = detected
+                state["proximity"] = changed
 
-            if should_log:
-                _add_ultrasonic_log(distance, detected, note)
+            # 상태 변화 시 또는 5초마다 로그 기록
+            if changed != last_log_detected or (now - last_log) >= 5.0:
+                note = f"변화 감지 ({smoothed:.1f}cm)" if changed else ""
+                _add_ultrasonic_log(distance, changed, note)
                 last_log = now
-                last_state = detected
+                last_log_detected = changed
+
         except Exception as e:
             with state_lock:
                 state["error"] = f"HC-SR04: {e}"
