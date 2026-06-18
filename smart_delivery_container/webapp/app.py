@@ -42,6 +42,11 @@ HCSR04_TRIGGER_PIN = 23  # 물리 핀 16
 HCSR04_ECHO_PIN    = 24  # 물리 핀 18
 HCSR04_THRESHOLD_CM = float(os.getenv("HCSR04_THRESHOLD_CM", "200.0"))
 
+# 스피커 GPIO 핀 (BCM 번호)
+SPEAKER_PIN       = int(os.getenv("SPEAKER_PIN", "18"))      # 물리 핀 12
+SPEAKER_FREQUENCY = int(os.getenv("SPEAKER_FREQUENCY", "2000"))
+SPEAKER_DUTY      = float(os.getenv("SPEAKER_DUTY_CYCLE", "20"))
+
 # 무게 설정 (calibration 후 조정)
 WEIGHT_THRESHOLD = 500   # g — 이 값 초과 시 이벤트 영상 전송
 TARE_OFFSET      = 0     # 영점 오프셋 (calibrate() 로 갱신됨)
@@ -53,7 +58,7 @@ WEIGHT_CANDIDATE_MAX_SPREAD_G = 120.0
 PRE_EVENT_BUFFER_SECONDS = float(os.getenv("PRE_EVENT_BUFFER_SECONDS", "30"))
 POST_EVENT_SECONDS = float(os.getenv("POST_EVENT_SECONDS", "10"))
 TELEGRAM_VIDEO_FPS = float(os.getenv("TELEGRAM_VIDEO_FPS", "10"))
-EVENT_COOLDOWN_SECONDS = float(os.getenv("EVENT_COOLDOWN_SECONDS", "45"))
+EVENT_COOLDOWN_SECONDS = float(os.getenv("EVENT_COOLDOWN_SECONDS", "10"))
 AUTO_TARE_ENABLED = True
 AUTO_TARE_STABLE_S = 20.0
 AUTO_TARE_MAX_ABS_G = 80.0
@@ -108,6 +113,40 @@ state = {
     "error": None,
 }
 state_lock = threading.Lock()
+
+# ── 스피커 초기화 ──────────────────────────────────────────────────────────
+_speaker_pwm = None
+_speaker_gpio = None
+
+def _init_speaker() -> None:
+    global _speaker_pwm, _speaker_gpio
+    try:
+        import RPi.GPIO as GPIO
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(SPEAKER_PIN, GPIO.OUT)
+        _speaker_pwm = GPIO.PWM(SPEAKER_PIN, SPEAKER_FREQUENCY)
+        _speaker_gpio = GPIO
+        print(f"[SPEAKER] 초기화 완료 — GPIO{SPEAKER_PIN}, {SPEAKER_FREQUENCY}Hz")
+    except Exception as e:
+        print(f"[SPEAKER] 초기화 실패 (콘솔 모드): {e}")
+
+def _beep(duration: float, freq: int) -> None:
+    if _speaker_pwm is None:
+        return
+    _speaker_pwm.ChangeFrequency(freq)
+    _speaker_pwm.start(SPEAKER_DUTY)
+    time.sleep(duration)
+    _speaker_pwm.stop()
+
+def alarm_speaker() -> None:
+    def _play():
+        for _ in range(3):
+            _beep(0.12, 1800)
+            time.sleep(0.12)
+            _beep(0.12, 1000)
+            time.sleep(0.08)
+    threading.Thread(target=_play, daemon=True).start()
 
 # ── HX711 초기화 ───────────────────────────────────────────────────────────
 hx = None
@@ -543,8 +582,8 @@ def read_weight_loop():
             avg_weight = sum(v for _, v in samples) / len(samples)
             over_threshold = abs(avg_weight) >= state["threshold"]
             triggered = (
-                over_threshold
-                and not was_over_threshold
+                not over_threshold
+                and was_over_threshold
                 and (now - last_trigger) > cooldown
                 and not state["video_saving"]
             )
@@ -598,6 +637,7 @@ def read_weight_loop():
                 with state_lock:
                     state["last_trigger_time"] = ts
                     state["video_saving"] = True
+                alarm_speaker()
                 print(f"[트리거] avg={avg_weight:.1f}g raw={raw_weight_g:.1f}g → 영상 저장 예약")
                 distance = state.get("distance_cm")
                 with state_lock:
@@ -860,6 +900,7 @@ def status():
 
 
 if __name__ == "__main__":
+    _init_speaker()
     # HX711 초기화 & 무게 읽기 스레드 시작
     threading.Thread(target=init_hx711, daemon=True).start()
     threading.Thread(target=read_weight_loop, daemon=True).start()
@@ -872,6 +913,7 @@ if __name__ == "__main__":
     print(f"카메라: Raspberry Pi CSI camera via rpicam-vid ({CAMERA_WIDTH}x{CAMERA_HEIGHT}@{CAMERA_FPS}fps)")
     print(f"HX711: DATA=GPIO{HX711_DATA_PIN}, CLK=GPIO{HX711_CLK_PIN}")
     print(f"HC-SR04: TRIG=GPIO{HCSR04_TRIGGER_PIN}, ECHO=GPIO{HCSR04_ECHO_PIN}, {HCSR04_THRESHOLD_CM}cm")
+    print(f"스피커: GPIO{SPEAKER_PIN}, {SPEAKER_FREQUENCY}Hz")
     print(f"Telegram: {'enabled' if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID else 'disabled'}")
     print(f"트리거 임계값: {WEIGHT_THRESHOLD}g, {WEIGHT_AVG_WINDOW_S:.0f}초 평균 기준")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
