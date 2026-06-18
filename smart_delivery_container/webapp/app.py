@@ -732,14 +732,16 @@ def measure_distance_cm() -> float:
 
 
 def read_ultrasonic_loop():
-    """초음파 거리 측정 — 변화 감지 시 카메라 ON, 1분 안정 시 카메라 OFF."""
+    """초음파 거리 측정 — 변화 감지 시 카메라 ON, 1분 내부 안정 시 카메라 OFF."""
     last_log = 0.0
     last_log_detected = None
 
-    # 기준 거리 추정용 버퍼 (스파이크 제거: 중간값 사용)
-    buf = deque(maxlen=30)
-    baseline = None            # 안정 상태 기준 거리
-    last_change_time = 0.0     # 마지막 변화 발생 시각
+    buf = deque(maxlen=30)   # 스파이크 제거용 버퍼
+    baseline = None          # 마지막으로 확정된 안정 기준 거리
+
+    # 안정성 판단용: 최근 CAMERA_IDLE_SECONDS 동안의 smoothed 값 추적
+    stability_buf = deque()  # (timestamp, smoothed)
+    STABILITY_TOLERANCE = DISTANCE_CHANGE_CM / 2.0  # 안정 판정 허용 편차 (기본 5cm)
 
     while True:
         try:
@@ -751,7 +753,7 @@ def read_ultrasonic_loop():
             now = time.time()
             buf.append(distance)
 
-            # 초기 기준값 수집 (10샘플 이상 모이면 확정)
+            # 초기 기준값 수집 (10샘플 모이면 확정)
             if baseline is None:
                 if len(buf) >= 10:
                     baseline = sorted(buf)[len(buf) // 2]
@@ -765,26 +767,32 @@ def read_ultrasonic_loop():
             recent = sorted(list(buf)[-5:])
             smoothed = recent[len(recent) // 2]
 
-            # 변화 감지 (기준 대비 ±DISTANCE_CHANGE_CM 이상)
+            # ── 안정성 버퍼 유지 ──────────────────────────────────────────
+            stability_buf.append((now, smoothed))
+            cutoff = now - CAMERA_IDLE_SECONDS
+            while stability_buf and stability_buf[0][0] < cutoff:
+                stability_buf.popleft()
+
+            stable_values = [v for _, v in stability_buf]
+            stable_age = (stability_buf[-1][0] - stability_buf[0][0]) if len(stability_buf) > 1 else 0.0
+            spread = (max(stable_values) - min(stable_values)) if stable_values else 999.0
+            is_stable = stable_age >= CAMERA_IDLE_SECONDS - 1.0 and spread < STABILITY_TOLERANCE
+
+            # ── 카메라 ON: 기준 대비 변화 감지 ───────────────────────────
             changed = abs(smoothed - baseline) >= DISTANCE_CHANGE_CM
+            if changed and not camera_requested.is_set():
+                start_camera_buffering(
+                    f"초음파 변화 ({smoothed:.1f}cm, 기준 {baseline:.1f}cm)"
+                )
 
-            if changed:
-                last_change_time = now
-                if not camera_requested.is_set():
-                    start_camera_buffering(f"초음파 변화 감지 ({smoothed:.1f}cm, 기준 {baseline:.1f}cm)")
-            else:
-                # 카메라가 켜져 있고 1분 이상 안정 → 카메라 OFF, 기준 갱신
-                if camera_requested.is_set() and (now - last_change_time) >= CAMERA_IDLE_SECONDS:
-                    stop_camera_buffering()
-                    baseline = smoothed
-                    buf.clear()
-                    buf.append(smoothed)
-                    _add_ultrasonic_log(distance, False, "안정 — 저전력 모드")
-                    last_log = now
-
-                # 카메라 꺼진 상태에서는 기준값 서서히 갱신
-                if not camera_requested.is_set():
-                    baseline = smoothed
+            # ── 카메라 OFF: 현재 값들이 1분간 안정 ────────────────────────
+            if camera_requested.is_set() and is_stable:
+                stop_camera_buffering()
+                baseline = smoothed   # 새 안정 위치를 기준으로 갱신
+                stability_buf.clear()
+                stability_buf.append((now, smoothed))
+                _add_ultrasonic_log(distance, False, f"안정 — 저전력 모드 (기준 {baseline:.1f}cm)")
+                last_log = now
 
             with state_lock:
                 state["distance_cm"] = round(distance, 1)
@@ -792,7 +800,7 @@ def read_ultrasonic_loop():
 
             # 상태 변화 시 또는 5초마다 로그 기록
             if changed != last_log_detected or (now - last_log) >= 5.0:
-                note = f"변화 감지 ({smoothed:.1f}cm)" if changed else ""
+                note = f"변화 ({smoothed:.1f}cm / 기준 {baseline:.1f}cm)" if changed else ""
                 _add_ultrasonic_log(distance, changed, note)
                 last_log = now
                 last_log_detected = changed
