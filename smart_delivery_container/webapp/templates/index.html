@@ -125,6 +125,23 @@
     .snap-time { color: #555; }
     .snap-empty { color: #444; font-size: 0.8rem; text-align: center; padding: 20px; }
 
+    /* 설정 카드 */
+    .settings-card { padding: 14px; }
+    .settings-card .card-title { padding: 0 0 10px; }
+    .setting-row { margin-bottom: 12px; }
+    .setting-label {
+      font-size: 0.75rem; color: #888; margin-bottom: 5px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .setting-label span { color: #ccc; font-family: monospace; }
+    textarea.setting-input {
+      width: 100%; background: #111; border: 1px solid #2a2a2a;
+      border-radius: 7px; color: #ddd; font-size: 0.82rem;
+      padding: 7px 10px; resize: vertical; min-height: 64px;
+      font-family: inherit;
+    }
+    textarea.setting-input:focus { outline: none; border-color: #6366f1; }
+
     /* 초음파 */
     .ultra-card { padding: 12px 14px; }
     .ultra-card .card-title { padding: 0 0 8px; }
@@ -230,6 +247,31 @@
     </div>
     <div class="ultra-log" id="ultraLog">
       <div class="snap-empty">아직 로그 없음</div>
+    </div>
+  </div>
+
+  <!-- 영상/메시지 설정 -->
+  <div class="card settings-card">
+    <div class="card-title">알림 설정</div>
+
+    <div class="setting-row">
+      <div class="setting-label">
+        이전 영상 길이
+        <span id="preSecondsVal">30 초</span>
+      </div>
+      <input type="range" id="preSecondsSlider" min="1" max="60" value="30"
+             style="width:100%;accent-color:#6366f1"
+             oninput="document.getElementById('preSecondsVal').textContent=this.value+' 초'">
+    </div>
+
+    <div class="setting-row">
+      <div class="setting-label">텔레그램 추가 메시지</div>
+      <textarea class="setting-input" id="customMsg"
+                placeholder="예) 1층 택배함 — 이 메시지가 알림 맨 위에 추가됩니다"></textarea>
+    </div>
+
+    <div class="btn-row">
+      <button onclick="saveSettings()" class="primary">저장</button>
     </div>
   </div>
 
@@ -384,6 +426,18 @@
   function snapshotNow() {
     fetch('/snapshot-now', { method: 'POST' }).then(r => r.json())
       .then(d => { if (!d.ok) alert('스냅샷 실패'); });
+  }
+
+  function saveSettings() {
+    const preSeconds = parseInt(document.getElementById('preSecondsSlider').value);
+    const customMsg = document.getElementById('customMsg').value.trim();
+    fetch('/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pre_seconds: preSeconds, custom_msg: customMsg })
+    }).then(r => r.json()).then(d => {
+      if (d.ok) alert(`저장 완료\n이전 영상: ${d.pre_event_seconds}초\n메시지: ${d.custom_msg || '(없음)'}`);
+    });
   }
 </script>
 </body>

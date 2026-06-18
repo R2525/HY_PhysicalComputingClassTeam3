@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, render_template, send_from_directory
+from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 
 
 APP_DIR = Path(__file__).parent
@@ -111,6 +111,8 @@ state = {
     "last_telegram_time": None,
     "hx_ready": False,
     "error": None,
+    "pre_event_seconds": PRE_EVENT_BUFFER_SECONDS,
+    "custom_msg": "",
 }
 state_lock = threading.Lock()
 
@@ -380,8 +382,9 @@ def record_event_video(event_id: str,
                        post_seconds: float = POST_EVENT_SECONDS) -> Path:
     """이벤트 이전 버퍼와 이벤트 이후 프레임을 하나의 MP4로 저장한다."""
     path = VIDEO_DIR / f"event_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{event_id}.mp4"
+    pre_event_s = state.get("pre_event_seconds", PRE_EVENT_BUFFER_SECONDS)
     camera_start = camera_started_monotonic or event_time
-    cutoff = max(camera_start, event_time - PRE_EVENT_BUFFER_SECONDS)
+    cutoff = max(camera_start, event_time - pre_event_s)
 
     with camera_condition:
         frames = [(ts, jpeg) for ts, jpeg in camera_frames if ts >= cutoff]
@@ -642,13 +645,16 @@ def read_weight_loop():
                 distance = state.get("distance_cm")
                 with state_lock:
                     buffered_seconds = state["camera_buffer_seconds"]
+                    pre_event_s = state["pre_event_seconds"]
+                    custom_msg = state["custom_msg"]
                 caption = (
+                    f"{custom_msg + chr(10) if custom_msg else ''}"
                     f"SmartDeliveryContainer 알림\n"
                     f"시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                     f"5초 평균: {avg_weight:.1f}g\n"
                     f"원본: {raw_weight_g:.1f}g\n"
                     f"초음파: {distance if distance is not None else '--'}cm\n"
-                    f"영상: 이전 저장분 {min(buffered_seconds, PRE_EVENT_BUFFER_SECONDS):.1f}초 + 이후 {POST_EVENT_SECONDS:.0f}초"
+                    f"영상: 이전 저장분 {min(buffered_seconds, pre_event_s):.1f}초 + 이후 {POST_EVENT_SECONDS:.0f}초"
                 )
                 event_id = datetime.now().strftime("%Y%m%d%H%M%S")
                 threading.Thread(
@@ -897,6 +903,20 @@ def status():
                     "camera_buffer_seconds": camera_buffer_seconds,
                     "camera_buffer_frames": camera_buffer_frames,
                     "video_saving": video_saving})
+
+
+@app.route("/settings", methods=["POST"])
+def update_settings():
+    data = request.get_json(force=True, silent=True) or {}
+    with state_lock:
+        if "pre_seconds" in data:
+            v = float(data["pre_seconds"])
+            state["pre_event_seconds"] = max(1.0, min(60.0, v))
+        if "custom_msg" in data:
+            state["custom_msg"] = str(data["custom_msg"])[:200]
+    return jsonify({"ok": True,
+                    "pre_event_seconds": state["pre_event_seconds"],
+                    "custom_msg": state["custom_msg"]})
 
 
 if __name__ == "__main__":
